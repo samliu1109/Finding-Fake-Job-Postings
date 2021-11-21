@@ -1,0 +1,640 @@
+---
+title: "Project 3"
+author: "Po Yi Liu"
+date: "11/08/2021"
+output:
+  html_document:
+    df_print: paged
+---
+
+## Library
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(tidymodels)
+library(janitor)
+library(skimr)
+library(vip)
+library(parallel)
+library(doParallel)
+library(embed)
+library(textrecipes)
+library(xgboost)
+```
+
+#import data and target
+```{r, message=FALSE, warning=FALSE}
+job_training <- read_csv("D:/fallclass/Intro to Machine Learning/project3/job_training.csv") %>%
+  clean_names() 
+job_holdout <- read_csv("D:/fallclass/Intro to Machine Learning/project3/job_holdout.csv") %>%
+  clean_names() 
+
+
+job_training %>%
+  count(has_questions)
+```
+
+#skim to look the data
+```{r, message=FALSE, warning=FALSE}
+job_training %>%
+  skim_without_charts()
+
+
+```
+#check the null
+```{r, message=FALSE, warning=FALSE}
+null_count <- function(c){
+  sum(is.na(c))
+}
+res_001 <- job_training %>%
+  summarise(across(1:18,null_count)) %>% 
+  pivot_longer(cols=1:18, names_to ="column", values_to="null_count") %>%
+  mutate(null_pct = null_count / nrow(job_training))
+
+res_001%>%
+  mutate(null_pct = round(null_pct,5))
+```
+```{r, message=FALSE, warning=FALSE}
+res_002 <- job_holdout %>%
+  summarise(across(1:17,null_count)) %>% 
+  pivot_longer(cols=1:17, names_to ="column", values_to="null_count") %>%
+  mutate(null_pct = null_count / nrow(job_holdout))
+
+res_002%>%
+  mutate(null_pct = round(null_pct,5))
+```
+
+## data preparation
+```{r, message=FALSE, warning=FALSE}
+job_training<- job_training %>%
+  mutate(fraudulent = factor(fraudulent),
+         has_company_logo = if_else(has_company_logo==1,"yes","No"),
+         telecommuting = if_else(telecommuting==1,"yes","No"),
+         has_questions = if_else(has_questions==1,"yes","No"))
+
+job_holdout<- job_holdout %>%
+  mutate(has_company_logo = if_else(has_company_logo==1,"yes","No"),
+         telecommuting = if_else(telecommuting==1,"yes","No"),
+         has_questions = if_else(has_questions==1,"yes","No"))
+
+```
+
+
+#deal with missing values 
+```{r, message=FALSE, warning=FALSE}
+train_recipe1 <- recipe(fraudulent ~ ., job_training) %>%
+  step_impute_mode(location,employment_type,
+                   required_experience,required_education,industry,job_function) %>%
+  step_unknown(company_profile,description,requirements,benefits,
+               department,salary_range) 
+ 
+
+bake_data <- bake(train_recipe1 %>% prep(), job_training)
+
+
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+holdout_recipe1 <- recipe(has_questions ~ ., job_holdout) %>%
+  step_impute_mode(location,employment_type,
+                   required_experience,required_education,industry,job_function) %>%
+  step_unknown(company_profile,description,requirements,benefits,
+               department,salary_range) 
+ 
+
+holdout_data <- bake(holdout_recipe1 %>% prep(), job_holdout)
+
+
+
+```
+
+
+# PRE PROCESSING STEPS 
+
+## Frequency Encoding 
+```{r, message=FALSE, warning=FALSE}
+title_freq_count  <- bake_data %>%
+  count(title, sort=TRUE) %>%
+  select(title, title_count = n)
+
+title_freq_count %>% head()
+# join back to fraud, drop email_domain. note the left join
+bake_data <- bake_data %>%
+  left_join(title_freq_count) %>%
+  select(-title)
+
+# join back to kaggle, drop email domain, fix missing values note the left join!!!
+holdout_data <- holdout_data %>%
+  left_join(title_freq_count) %>%
+  select(-title)
+
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+location_freq_count  <- bake_data %>%
+  count(location, sort=TRUE) %>%
+  select(location, location_count = n)
+
+location_freq_count %>% head()
+# join back to fraud, drop email_domain. note the left join
+bake_data <- bake_data %>%
+  left_join(location_freq_count) %>%
+  select(-location)
+
+# join back to kaggle, drop email domain, fix missing values note the left join!!!
+holdout_data <- holdout_data %>%
+  left_join(location_freq_count) %>%
+  select(-location)
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+department_freq_count  <- bake_data %>%
+  count(department, sort=TRUE) %>%
+  select(department, department_count = n)
+
+department_freq_count %>% head()
+# join back to fraud, drop email_domain. note the left join
+bake_data <- bake_data %>%
+  left_join(department_freq_count) %>%
+  select(-department)
+
+# join back to kaggle, drop email domain, fix missing values note the left join!!!
+holdout_data <- holdout_data %>%
+  left_join(department_freq_count) %>%
+  select(-department)
+
+```
+
+## Target Encoding
+```{r, message=FALSE, warning=FALSE}
+salary_fraud_rate <- bake_data %>%
+  group_by(fraudulent, salary_range) %>%
+  summarise(n = n()) %>%
+  pivot_wider(names_from = fraudulent, values_from = n, values_fill = 0.0) %>%
+  rename(legit=`0`,fraud=`1`)%>%
+  mutate(salary_pct_fraud = fraud/(fraud + legit)) %>%
+  select(salary_range, salary_pct_fraud)
+
+salary_fraud_rate
+# join back to fraud, drop email_domain. note the left join
+bake_data <- bake_data %>%
+  left_join(salary_fraud_rate) %>%
+  select(-salary_range)
+
+# jion back to kaggle, drop email domain, fix missing values note the left join!!!
+holdout_data <- holdout_data %>%
+  left_join(salary_fraud_rate) %>%
+  mutate(pct_fraud = if_else(is.na(salary_pct_fraud),0,salary_pct_fraud))%>%
+  select(-salary_range)
+holdout_data
+```
+```{r, message=FALSE, warning=FALSE}
+industry_fraud_rate <- bake_data %>%
+  group_by(fraudulent, industry) %>%
+  summarise(n = n()) %>%
+  pivot_wider(names_from = fraudulent, values_from = n, values_fill = 0.0) %>%
+  rename(legit=`0`,fraud=`1`)%>%
+  mutate(industry_pct_fraud = fraud/(fraud + legit)) %>%
+  select(industry, industry_pct_fraud)
+
+industry_fraud_rate
+# join back to fraud, drop email_domain. note the left join
+bake_data <- bake_data %>%
+  left_join(industry_fraud_rate) %>%
+  select(-industry)
+
+# jion back to kaggle, drop email domain, fix missing values note the left join!!!
+holdout_data <- holdout_data %>%
+  left_join(industry_fraud_rate) %>%
+  mutate(pct_fraud = if_else(is.na(industry_pct_fraud),0,industry_pct_fraud))%>%
+  select(-industry)
+holdout_data
+```
+
+
+## Data modeling
+
+#partition data
+```{r, message=FALSE, warning=FALSE}
+set.seed(123)
+
+train_test_spit<- initial_split(bake_data, prop = 0.7)
+
+train <- training(train_test_spit)
+test  <- testing(train_test_spit)
+
+sprintf("Train PCT : %1.2f%%", nrow(train)/ nrow(bake_data) * 100)
+sprintf("Test  PCT : %1.2f%%", nrow(test)/ nrow(bake_data) * 100)
+
+train_cv_folds <- vfold_cv(train, v=5)
+```
+
+#Define recipe
+```{r, message=FALSE, warning=FALSE}
+
+final_recipe <- recipe(fraudulent ~ ., 
+                      data = train) %>%
+  step_rm(job_id)%>%
+  step_impute_mean(all_numeric_predictors())%>%
+  #step_normalize(all_numeric_predictors()) %>%
+  step_dummy(employment_type,required_experience,required_education,job_function,
+             telecommuting,has_company_logo,has_questions)%>%
+  step_tokenize(company_profile,description,requirements,benefits) %>% # Tokenizes to words by default
+  step_stopwords(company_profile,description,requirements,benefits) %>% # Uses the english snowball list by default
+  step_tokenfilter(company_profile,description,requirements,benefits, min_times = 20) %>%
+  step_tfidf(company_profile,description,requirements,benefits)
+
+```
+
+#bake_data
+```{r, message=FALSE, warning=FALSE}
+# -- apply the recipe 
+bake_train <- bake(final_recipe%>%prep(), new_data = train)
+bake_test  <- bake(final_recipe%>%prep(), new_data = test)
+```
+
+## random forest
+#Define the Model Document and hyper parameters
+#Create a workflow and Fit the model
+```{r, message=FALSE, warning=FALSE}
+fraud_rf_spec <- rand_forest(
+    trees  = tune(),
+    min_n = tune(),
+   ) %>% 
+      set_engine("ranger", importance = "impurity") %>% 
+      set_mode("classification")
+
+fraud_rf_wf <- workflow() %>%
+  add_recipe(final_recipe) %>%
+  add_model(fraud_rf_spec) 
+ 
+
+```
+
+#tunning random forest
+```{r, message=FALSE, warning=FALSE}
+# -- setup your tuning grid -- random force 
+tune_grid_rf <- grid_random(trees(c(100,200)),
+                         min_n(),
+                          size = 5)
+print(tune_grid_rf)
+
+# -- setup parallel process 
+all_cores <- detectCores(logical = TRUE)
+sprintf("# of Logical Cores: %d", all_cores)
+cl <- makeCluster(all_cores)
+registerDoParallel(cl)
+
+# -- train!! K times for each parameter -- 
+rf_tuning_results <- fraud_rf_wf %>% 
+  tune_grid(
+    resamples = train_cv_folds,
+    grid = tune_grid_rf,
+    control = control_resamples(save_pred = TRUE)
+    )
+
+rf_tuning_results
+
+```
+
+#Review Tuning Results 
+````{r, message=FALSE, warning=FALSE}
+## -- results of tuning -- 
+rf_tuning_results %>% 
+  collect_metrics() %>%
+  mutate_if(is.numeric, round,3) %>% 
+  pivot_wider(names_from = .metric, values_from=c(mean, std_err))
+```
+#Visualize impact 
+```{r, message=FALSE, warning=FALSE}
+## - visualize 
+rf_tuning_results %>%
+  collect_metrics() %>%
+  mutate_if(is.numeric, round,3) %>%
+  ggplot(aes(trees, mean, )) +
+  geom_line(size = 1.5, alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ .metric, scales = "free", nrow = 2) 
+
+rf_tuning_results %>%
+  collect_metrics()  %>%
+  mutate_if(is.numeric, round,3) %>%
+  ggplot(aes(min_n, mean, )) +
+  geom_line(size = 1.5, alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ .metric, scales = "free", nrow = 2) 
+
+```
+## random forest results 
+selecting "best" parameters
+```{r, message=FALSE, warning=FALSE}
+rf_tuning_results %>%
+  show_best("roc_auc") %>%
+  print()
+
+rf_best <- rf_tuning_results %>%
+  select_best("roc_auc") 
+
+print(rf_best)
+```
+
+## refitting workflow with "best" parameters
+
+```{r, message=FALSE, warning=FALSE}
+rf_final_wf <- fraud_rf_wf %>% 
+  finalize_workflow(rf_best)
+
+print(rf_final_wf)
+
+rf_final_fit  <- rf_final_wf %>%
+  fit(data = train) 
+```
+
+#variable importance
+```{r, message=FALSE, warning=FALSE}
+rf_final_fit %>% 
+  pull_workflow_fit() %>% 
+  vip(20)
+```
+
+#model performance
+```{r, message=FALSE, warning=FALSE}
+# -- score training  
+predict(rf_final_fit, train) %>%
+  bind_cols(.,train)-> scored_train_rf 
+
+# -- score testing 
+predict(rf_final_fit, test) %>%
+     bind_cols(., test) -> scored_test_rf   
+
+# -- Metrics: Train and Test 
+scored_train_rf %>% 
+  metrics(fraudulent, .pred_class) %>%
+  mutate(part="training") %>%
+  bind_rows( scored_test_rf %>% 
+               metrics(fraudulent, .pred_class) %>%
+               mutate(part="testing") ) %>%
+  pivot_wider(names_from = .metric, values_from=.estimate)
+  
+# -- variable importance: top 10
+#rf_final_fit %>%
+#  pull_workflow_fit() %>%
+#  vip(num_features = 10)
+```
+
+#Evaluate metrics on Train and Test
+```{r, message=FALSE, warning=FALSE}
+options(yardstick.event_first = FALSE)
+
+model_score <- function(df, model, model_name){
+  scored_df <- predict(model,df, type = "prob") %>%
+    bind_cols(.,predict(model, df)) %>%
+    bind_cols(df) %>%
+    mutate(model_name = model_name)
+  
+  return(scored_df)
+}
+
+
+
+rf_train <- model_score(train,rf_final_fit,"rf training" )
+rf_test <- model_score(test,rf_final_fit,"rf testing" )
+
+# -- Metrics: Train and Test -- 
+bind_rows(rf_train,rf_test) %>% 
+  group_by(model_name) %>%
+  metrics(fraudulent, .pred_1, estimate = .pred_class) %>%
+  pivot_wider(id=c(model_name),names_from =.metric, values_from = .estimate) %>%
+  mutate(misclassification_rate = 1 - accuracy)
+
+# -- ROC Chart -- 
+bind_rows(rf_train,rf_test) %>% 
+  group_by(model_name) %>%
+  roc_curve(fraudulent, .pred_1) %>%
+  autoplot() +
+  geom_vline(xintercept=0.06, color="red") +
+  labs(title = "ROC chart-random forest")
+
+precision(rf_test, fraudulent, .pred_class)
+recall(rf_test, fraudulent, .pred_class)
+
+#confusion matrix
+rf_test %>%
+  conf_mat(fraudulent, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") + labs(title="confusion matrix default-random forest")
+
+```
+
+## xgboost
+```{r, message=FALSE, warning=FALSE}
+xgb_model <- boost_tree(
+  trees = tune(), 
+  tree_depth = tune(),       ## how deep of a tree, model complexity
+  min_n = tune(),            ## minimum number of observations 
+  learn_rate = tune()        ## step size
+) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("classification")
+
+xgb_model
+
+# -- setup workflow 
+xgb_workflow <- workflow() %>%
+  add_recipe(final_recipe) %>%
+  add_model(xgb_model) 
+
+```
+#tunning xgboost
+```{r, message=FALSE, warning=FALSE}
+tune_grid <- grid_random(trees(), 
+                         tree_depth(),
+                          min_n(),
+                          learn_rate(),
+                          size = 5)
+print(tune_grid)
+```
+
+#tunning result
+```{r, message=FALSE, warning=FALSE}
+all_cores <- detectCores(logical = TRUE)
+sprintf("# of Logical Cores: %d", all_cores)
+cl <- makeCluster(all_cores)
+registerDoParallel(cl)
+
+xgb_tuning_results <- xgb_workflow %>%
+  tune_grid(
+  resamples = train_cv_folds,
+  grid = tune_grid,
+  control = control_resamples(save_pred = TRUE))
+ 
+xgb_tuning_results
+
+```
+
+
+## Review Tuning Results 
+```{r, message=FALSE, warning=FALSE}
+## -- results of tuning -- 
+ xgb_tuning_results %>% 
+   collect_metrics() %>%
+   mutate_if(is.numeric, round,3) %>% 
+   pivot_wider(names_from = .metric, values_from=c(mean, std_err))
+```
+
+
+
+## Visualize impact 
+```{r, message=FALSE, warning=FALSE}
+## - visualize 
+xgb_tuning_results %>%
+  collect_metrics() %>%
+  mutate_if(is.numeric, round,3) %>%
+  ggplot(aes(trees, mean, )) +
+  geom_line(size = 1.5, alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ .metric, scales = "free", nrow = 2) 
+
+xgb_tuning_results %>%
+  collect_metrics()  %>%
+  mutate_if(is.numeric, round,3) %>%
+  ggplot(aes(min_n, mean, )) +
+  geom_line(size = 1.5, alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ .metric, scales = "free", nrow = 2) 
+
+xgb_tuning_results %>%
+  collect_metrics()  %>%
+  mutate_if(is.numeric, round,3) %>%
+  ggplot(aes(tree_depth, mean, )) +
+  geom_line(size = 1.5, alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ .metric, scales = "free", nrow = 2) 
+
+xgb_tuning_results %>%
+  collect_metrics()  %>%
+  mutate_if(is.numeric, round,3) %>%
+  ggplot(aes(learn_rate, mean, )) +
+  geom_line(size = 1.5, alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ .metric, scales = "free", nrow = 2) 
+
+```
+
+#model results 
+```{r, message=FALSE, warning=FALSE}
+xgb_tuning_results %>%
+  show_best("roc_auc") %>%
+  print()
+
+xgb_best <- xgb_tuning_results %>%
+  select_best("roc_auc") 
+
+print(xgb_best)
+```
+
+
+#refitting workflow with "best" parameters
+```{r, message=FALSE, warning=FALSE}
+xgb_final_wf <- xgb_workflow %>% 
+  finalize_workflow(xgb_best)
+
+print(xgb_final_wf)
+
+xgb_final_fit  <- xgb_final_wf %>%
+  fit(data = train) 
+```
+
+
+#variable importance
+```{r, message=FALSE, warning=FALSE}
+xgb_final_fit %>% 
+  pull_workflow_fit() %>% 
+  vip(20)
+```
+
+#evaluate xgboost
+```{r, message=FALSE, warning=FALSE}
+# -- score training  
+options(yardstick.event_first = FALSE)
+
+
+predict(xgb_final_fit, train, type="prob") %>%
+bind_cols(
+  predict(xgb_final_fit, train) %>%
+    bind_cols(.,train)) -> scored_train_boost 
+
+# -- score testing 
+predict(xgb_final_fit, test, type="prob") %>%
+  bind_cols(
+      predict(xgb_final_fit, test) %>%
+      bind_cols(., test)) -> scored_test_boost   
+
+# -- Metrics: Train and Test 
+scored_train_boost %>% 
+  metrics(fraudulent, estimate = .pred_class, .pred_1) %>%
+  mutate(part="training") %>%
+  bind_rows( scored_test_boost %>% 
+                 metrics(fraudulent, estimate = .pred_class, .pred_1) %>%
+               mutate(part="testing") ) %>%
+  pivot_wider(names_from = .metric, values_from=.estimate)%>%
+  mutate(misclassification_rate = 1 - accuracy)
+  
+# -- variable importance: top 10
+xgb_final_fit %>%
+  pull_workflow_fit() %>%
+  vip(num_features = 10)
+
+  
+```
+#visualize the performance
+```{r, message=FALSE, warning=FALSE}
+options(yardstick.event_first = FALSE)
+
+  
+
+scored_train_boost %>% 
+  mutate(part="training") %>%
+  bind_rows( scored_test_boost %>% 
+               mutate(part="testing") ) %>%
+ group_by(part) %>%
+ roc_curve(fraudulent, .pred_1) %>%
+  autoplot()+
+  labs(title = "ROC chart-xgboost")
+
+
+
+```
+
+#comparing two model
+```{r, message=FALSE, warning=FALSE}
+#ROC chart comparing different models
+bind_rows(rf_test %>%
+  mutate(model = "random forest"),
+scored_test_boost %>%
+  mutate(model = "xgboost")) %>%
+  group_by(model) %>%
+  roc_curve(fraudulent, .pred_1) %>%
+  autoplot() +
+  geom_vline(xintercept=0.1, color="red") +
+  labs(title = "ROC chart-random forest & xgboost")
+```
+#caculate different metric
+```{r, message=FALSE, warning=FALSE}
+calc_metrics<- function(data_set){
+  data_set %>%
+    accuracy(fraudulent, estimate = .pred_class)%>%
+    bind_rows(data_set%>%
+      precision(fraudulent, estimate = .pred_class))%>%
+    bind_rows(data_set %>%
+      recall(fraudulent, estimate = .pred_class))
+
+}
+
+calc_metrics(scored_train_boost)
+calc_metrics(scored_test_boost)
+calc_metrics(rf_train)
+calc_metrics(rf_test)
+```
+
