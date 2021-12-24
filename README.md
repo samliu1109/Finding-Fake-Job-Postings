@@ -1,7 +1,8 @@
 # Finding-Fake-Job-Postings
 
-Executive Summary 
-Problem 
+
+Problem
+
 Finding a perfect job is always a challenging task for every user on the website. However, what is worse is that there are job positions from fake offers from scammers that are hard to discern and easily deceived, which detriment the user experience. Therefore, as a data analyst in the company, it is important to discover the underlying characteristics in the job posting that can be identified as a high probability of a fake job to mitigate the number of fake jobs on the website and improve user experience.
 
 Key Findings  
